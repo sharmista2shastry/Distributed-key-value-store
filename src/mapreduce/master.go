@@ -30,41 +30,67 @@ func (mr *MapReduce) KillWorkers() *list.List {
 	return l
 }
 
+func (mr *MapReduce) GetNextWorker(Workers map[string]*WorkerInfo) string {
+	var mux sync.Mutex // Create a mutex
+
+	worker := <-mr.registerChannel
+
+	mux.Lock() // Lock the mutex
+	_, present := mr.Workers[worker]
+	if !present {
+		mr.Workers[worker] = &WorkerInfo{}
+	}
+	mux.Unlock() // Unlock the mutex
+
+	return worker
+}
+
+func (mr *MapReduce) DistributeMapJob(args *DoJobArgs, worker string, mapComplete chan bool, Workers map[string]*WorkerInfo) {
+	var reply DoJobReply
+
+	ok := call(worker, "Worker.DoJob", args, &reply)
+
+	if ok {
+		mapComplete <- true
+		mr.registerChannel <- worker
+	} else {
+		log.Printf("Worker %s failed Map task\n", worker)
+		delete(Workers, worker)
+		worker := mr.GetNextWorker(Workers)
+		mr.DistributeMapJob(args, worker, mapComplete, Workers)
+	}
+}
+
+func (mr *MapReduce) DistributeReduceJob(args *DoJobArgs, worker string, reduceComplete chan bool, Workers map[string]*WorkerInfo) {
+	var reply DoJobReply
+
+	ok := call(worker, "Worker.DoJob", args, &reply)
+
+	if ok {
+		reduceComplete <- true
+		mr.registerChannel <- worker
+	} else {
+		log.Printf("Worker %s failed Reduce task\n", worker)
+		delete(Workers, worker)
+		worker := mr.GetNextWorker(Workers)
+		mr.DistributeMapJob(args, worker, reduceComplete, Workers)
+	}
+}
+
 func (mr *MapReduce) RunMaster() *list.List {
 	// Your code here
 	mr.Workers = make(map[string]*WorkerInfo)
-	var mux sync.Mutex // Create a mutex
 
 	mapComplete := make(chan bool, mr.nMap)
 	reduceComplete := make(chan bool, mr.nReduce)
 
 	for i := 0; i < mr.nMap; i++ {
 		go func(jobNum int) {
-			worker := <-mr.registerChannel
+			worker := mr.GetNextWorker(mr.Workers)
 
-			mux.Lock() // Lock the mutex
-			_, present := mr.Workers[worker]
-			if !present {
-				mr.Workers[worker] = &WorkerInfo{}
-			}
-			mux.Unlock() // Unlock the mutex
+			args := &DoJobArgs{mr.file, Map, jobNum, mr.nReduce}
 
-			args := &DoJobArgs{}
-			args.File = mr.file
-			args.Operation = Map
-			args.JobNumber = jobNum
-			args.NumOtherPhase = mr.nReduce
-
-			var reply DoJobReply
-
-			ok := call(worker, "Worker.DoJob", args, &reply)
-
-			if ok {
-				mapComplete <- true
-				mr.registerChannel <- worker
-			} else {
-				log.Printf("Error: Worker %v failed the given task %v", worker, args.JobNumber)
-			}
+			mr.DistributeMapJob(args, worker, mapComplete, mr.Workers)
 		}(i)
 	}
 
@@ -72,43 +98,19 @@ func (mr *MapReduce) RunMaster() *list.List {
 		<-mapComplete
 	}
 
-	log.Printf("Finish Map...\n")
-
 	for i := 0; i < mr.nReduce; i++ {
 		go func(jobNum int) {
-			worker := <-mr.registerChannel
+			worker := mr.GetNextWorker(mr.Workers)
 
-			mux.Lock() // Lock the mutex
-			_, present := mr.Workers[worker]
-			if !present {
-				mr.Workers[worker] = &WorkerInfo{}
-			}
-			mux.Unlock() // Unlock the mutex
+			args := &DoJobArgs{mr.file, Reduce, jobNum, mr.nMap}
 
-			args := &DoJobArgs{}
-			args.File = mr.file
-			args.Operation = Reduce
-			args.JobNumber = jobNum
-			args.NumOtherPhase = mr.nMap
-
-			var reply DoJobReply
-
-			ok := call(worker, "Worker.DoJob", args, &reply)
-
-			if ok {
-				reduceComplete <- true
-				mr.registerChannel <- worker
-			} else {
-				log.Printf("Error: Worker %v failed the given task %v", worker, args.JobNumber)
-			}
+			mr.DistributeReduceJob(args, worker, reduceComplete, mr.Workers)
 		}(i)
 	}
 
 	for i := 0; i < mr.nReduce; i++ {
 		<-reduceComplete
 	}
-
-	log.Printf("Finish Reduce...\n")
 
 	return mr.KillWorkers()
 }
