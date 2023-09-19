@@ -3,8 +3,6 @@ package mapreduce
 import (
 	"container/list"
 	"fmt"
-	"log"
-	"sync"
 )
 
 type WorkerInfo struct {
@@ -30,50 +28,57 @@ func (mr *MapReduce) KillWorkers() *list.List {
 	return l
 }
 
-func (mr *MapReduce) GetNextWorker(Workers map[string]*WorkerInfo) string {
-	var mux sync.Mutex // Create a mutex
+func (mr *MapReduce) GetNextWorker() string {
 
 	worker := <-mr.registerChannel
 
-	mux.Lock() // Lock the mutex
+	mr.mux.Lock()
 	_, present := mr.Workers[worker]
 	if !present {
 		mr.Workers[worker] = &WorkerInfo{}
 	}
-	mux.Unlock() // Unlock the mutex
+	mr.mux.Unlock()
 
 	return worker
 }
 
-func (mr *MapReduce) DistributeMapJob(args *DoJobArgs, worker string, mapComplete chan bool, Workers map[string]*WorkerInfo) {
+func (mr *MapReduce) DistributeMapJob(args *DoJobArgs, worker string, mapComplete chan bool) {
 	var reply DoJobReply
 
-	ok := call(worker, "Worker.DoJob", args, &reply)
+	mr.mux.Lock()
+	success := call(worker, "Worker.DoJob", args, &reply)
+	mr.mux.Unlock()
 
-	if ok {
+	if success {
 		mapComplete <- true
 		mr.registerChannel <- worker
+		return
 	} else {
-		log.Printf("Worker %s failed Map task\n", worker)
-		delete(Workers, worker)
-		worker := mr.GetNextWorker(Workers)
-		mr.DistributeMapJob(args, worker, mapComplete, Workers)
+		mr.mux.Lock()
+		delete(mr.Workers, worker)
+		mr.mux.Unlock()
+		worker := mr.GetNextWorker()
+		mr.DistributeMapJob(args, worker, mapComplete)
 	}
 }
 
-func (mr *MapReduce) DistributeReduceJob(args *DoJobArgs, worker string, reduceComplete chan bool, Workers map[string]*WorkerInfo) {
+func (mr *MapReduce) DistributeReduceJob(args *DoJobArgs, worker string, reduceComplete chan bool) {
 	var reply DoJobReply
 
-	ok := call(worker, "Worker.DoJob", args, &reply)
+	mr.mux.Lock()
+	success := call(worker, "Worker.DoJob", args, &reply)
+	mr.mux.Unlock()
 
-	if ok {
+	if success {
 		reduceComplete <- true
 		mr.registerChannel <- worker
+		return
 	} else {
-		log.Printf("Worker %s failed Reduce task\n", worker)
-		delete(Workers, worker)
-		worker := mr.GetNextWorker(Workers)
-		mr.DistributeMapJob(args, worker, reduceComplete, Workers)
+		mr.mux.Lock()
+		delete(mr.Workers, worker)
+		mr.mux.Unlock()
+		worker := mr.GetNextWorker()
+		mr.DistributeReduceJob(args, worker, reduceComplete)
 	}
 }
 
@@ -85,13 +90,11 @@ func (mr *MapReduce) RunMaster() *list.List {
 	reduceComplete := make(chan bool, mr.nReduce)
 
 	for i := 0; i < mr.nMap; i++ {
-		go func(jobNum int) {
-			worker := mr.GetNextWorker(mr.Workers)
+		worker := mr.GetNextWorker()
 
-			args := &DoJobArgs{mr.file, Map, jobNum, mr.nReduce}
+		args := &DoJobArgs{mr.file, Map, i, mr.nReduce}
 
-			mr.DistributeMapJob(args, worker, mapComplete, mr.Workers)
-		}(i)
+		go mr.DistributeMapJob(args, worker, mapComplete)
 	}
 
 	for i := 0; i < mr.nMap; i++ {
@@ -99,13 +102,11 @@ func (mr *MapReduce) RunMaster() *list.List {
 	}
 
 	for i := 0; i < mr.nReduce; i++ {
-		go func(jobNum int) {
-			worker := mr.GetNextWorker(mr.Workers)
+		worker := mr.GetNextWorker()
 
-			args := &DoJobArgs{mr.file, Reduce, jobNum, mr.nMap}
+		args := &DoJobArgs{mr.file, Reduce, i, mr.nMap}
 
-			mr.DistributeReduceJob(args, worker, reduceComplete, mr.Workers)
-		}(i)
+		go mr.DistributeReduceJob(args, worker, reduceComplete)
 	}
 
 	for i := 0; i < mr.nReduce; i++ {
