@@ -38,6 +38,7 @@ func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
 	vs.lastPing[server] = time.Now()
 
 	if server == vs.currentView.Primary {
+		// if viewNum = 0 and the server is the primary, then the primary has just restarted after a crash
 		if viewNum == 0 {
 			vs.currentView.Primary = vs.currentView.Backup
 			if vs.idleServer != "" {
@@ -107,7 +108,7 @@ func (vs *ViewServer) tick() {
 			vs.currentView.Backup = vs.idleServer
 			vs.idleServer = ""
 		} else {
-			// If there is no idle server, just clear the primary
+			// If there is no idle server, just clear the backup
 			vs.currentView.Backup = ""
 		}
 		vs.currentView.Viewnum++
