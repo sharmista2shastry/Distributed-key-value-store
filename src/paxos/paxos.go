@@ -37,15 +37,15 @@ import (
 type Paxos struct {
 	mu         sync.Mutex
 	l          net.Listener
-	dead       bool
-	unreliable bool
+	dead       bool // bool to indicate if the paxos peer is dead
+	unreliable bool // bool to inidicate if the paxos peer is unreliable
 	rpcCount   int
 	peers      []string
 	me         int
 
 	// Your data here.
-	InstanceStates map[int]*State
-	MinSeq         []int
+	InstanceStates map[int]*State // a map from instance sequence numbers to Paxos States
+	MinSeq         []int          // slice tracking minimum done sequence numbers for each peer
 	maxSeq         int
 }
 
@@ -79,23 +79,29 @@ type State struct {
 	Decided bool
 }
 
+// Generates a proposal number by concatenating the sequence number and the server number.
 func GenerateProposalNum(num, serverNum int) int {
 	idStr := strconv.Itoa(num) + strconv.Itoa(serverNum)
 	id, _ := strconv.Atoi(idStr)
 	return id
 }
 
+// cleans up outdated paxos instances
 func (px *Paxos) CleanUpInstances(peer int, min int) {
 	px.mu.Lock()
 	defer px.mu.Unlock()
 
+	// if the minimum sequence number for this peer is higher than the current sequence number, then we do not need to cleanup
 	if px.MinSeq[peer] >= min {
 		return
 	}
 
 	px.MinSeq[peer] = min
 
+	// finds the minimum "done" sequence number across all peers
 	overallMin := px.Min()
+
+	// iterate through the map of paxos states and delete any instances that are lower than the overall minimum
 	for seq := range px.InstanceStates {
 		if seq < overallMin {
 			delete(px.InstanceStates, seq)
@@ -110,6 +116,8 @@ func (px *Paxos) Prepare(args *RPCArgs, reply *RPCReply) error {
 	reply.MinSeq = px.MinSeq[px.me]
 	reply.ResponderID = px.me
 
+	// get the current state of the instance
+	// if the instance is not in the map, create a new state
 	seq := args.Seq
 	currentState, ok := px.InstanceStates[seq]
 	if !ok {
@@ -117,12 +125,15 @@ func (px *Paxos) Prepare(args *RPCArgs, reply *RPCReply) error {
 		px.InstanceStates[seq] = currentState
 	}
 
+	// if the given proposal number is higher than any previous proposal for this instance, it accepts and updates the paxos state.
+	// If not, it rejects the proposal.
 	if args.N > currentState.Np {
 		currentState.Np = args.N
 		reply.N = currentState.Na
 		reply.Val = currentState.Va
 		reply.Err = OK
 	} else {
+		// rejects the proposal if this proposal number is lower than the highest proposal number for this instance.
 		reply.Err = ERROR
 	}
 
@@ -166,11 +177,15 @@ func (px *Paxos) Decide(args *RPCArgs, reply *RPCReply) error {
 	px.mu.Lock()
 	defer px.mu.Unlock()
 
+	// checks if there is an instance with the given sequence number
 	state, ok := px.InstanceStates[args.Seq]
+
+	// if the instance does not exist, create a new instance
 	if !ok {
 		state = &State{}
 	}
 
+	// if the instance is not decided yet, then update the instance
 	state.Decided = true
 	state.Va = args.Val
 	reply.Err = OK
@@ -220,23 +235,30 @@ func (px *Paxos) Propose(value interface{}, seq int) {
 		Seq:         seq,
 		InitiatorID: px.me,
 	}
-
+	// generates a proposal number by concatenating the sequence number and the server number.
 	N := GenerateProposalNum(seq, px.me)
+
+	// Enters into an infinite loop to attempt reaching consensus through Paxos
 	for {
+		// increments the proposal number in each iteration
 		N++
 
+		// if paxos instance is dead, return
 		if px.dead {
 			return
 		}
 
 		// get ready to send rpcs
 		args.N = N
-		args.MinSeq = px.MinSeq[px.me]
+		args.MinSeq = px.MinSeq[px.me] // minimum sequence number this peer has seen so far
 
-		replyChannel := make(chan *RPCReply, len(px.peers))
+		replyChannel := make(chan *RPCReply, len(px.peers)) // creates a reply channel to receive responses asynchronously
 		var replies []*RPCReply
 
+		// loops through all peers and sends a prepare rpc to each peer
 		for i, p := range px.peers {
+			// if the peer is this one, then call Prepare() locally
+			// otherwise, send a Prepare() rpc to the peer and store the reply in replyChannel asynchonously using go routine
 			if i == px.me {
 				reply := new(RPCReply)
 				px.Prepare(args, reply)
@@ -253,24 +275,29 @@ func (px *Paxos) Propose(value interface{}, seq int) {
 			}
 		}
 
+		// iterates through all peers and receives the reply from each peer asynchronously
 		acceptedCount := 0
 		for range px.peers {
 			reply := <-replyChannel
 			replies = append(replies, reply)
 			if reply.Err == OK {
+				// if the peer accepted the proposal, increment acceptedCount
 				acceptedCount++
 			}
 		}
 
+		// checks if the number of accepted proposals is greater than half of the number of peers
 		if acceptedCount >= len(px.peers)/2+1 {
 			maxN := 0
 			var maxV interface{}
+			// finds the proposal with the highest proposal number and value from the replies.
 			for _, reply := range replies {
 				if int(reply.N) > maxN {
 					maxN, maxV = int(reply.N), reply.Val
 				}
 			}
 
+			// sets the value of the current proposal args to the value of the highest accepted proposal maxV
 			if maxV != nil {
 				args.Val = maxV
 			}

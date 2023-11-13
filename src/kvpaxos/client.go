@@ -62,14 +62,20 @@ func (ck *Clerk) Get(key string) string {
 	r := 100
 	to := time.Duration(r) * time.Millisecond
 
+	// Try forever.
 	for {
+		// Pick a random server.
 		k := mrand.Intn(len(ck.servers))
 		var reply GetReply
+
+		// Send an RPC request to the server to get the value.
 		ok := call(ck.servers[k], "KVPaxos.Get", args, &reply)
 		if ok {
+			// Delete the operation from the cache.
 			ck.deleteOp = args.Nrand
 			return reply.Value
 		}
+		// If it fails, then the server should retry after a while (100 milliseconds in our case).
 		time.Sleep(to)
 	}
 }
@@ -87,10 +93,14 @@ func (ck *Clerk) PutExt(key string, value string, doHash bool) string {
 	to := time.Duration(r) * time.Millisecond
 
 	for {
+		// Pick a random server.
 		k := mrand.Intn(len(ck.servers))
 		var reply PutReply
+
+		// Send an RPC request to the server to put the value.
 		ok := call(ck.servers[k], "KVPaxos.Put", args, &reply)
 		if ok {
+			// Delete the operation from the cache.
 			ck.deleteOp = args.Nrand
 			return reply.PreviousValue
 		}

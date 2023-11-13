@@ -153,9 +153,7 @@ func (kv *KVPaxos) Put(args *PutArgs, reply *PutReply) error {
 	// Delete operation from cache if necessary
 	if args.Delete != 0 {
 		kv.mu.Lock()
-		if _, ok := kv.ans[args.Delete]; ok {
-			delete(kv.ans, args.Delete)
-		}
+		delete(kv.ans, args.Delete)
 		kv.mu.Unlock()
 	}
 
