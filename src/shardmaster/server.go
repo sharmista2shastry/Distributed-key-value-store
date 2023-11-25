@@ -11,7 +11,6 @@ import (
 	"net/rpc"
 	"os"
 	"paxos"
-	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -21,22 +20,23 @@ type ShardMaster struct {
 	mu         sync.Mutex
 	l          net.Listener
 	me         int
-	dead       bool
-	unreliable bool
+	dead       bool // for testing
+	unreliable bool // for testing
 	px         *paxos.Paxos
 
-	configurations []Config
-	maxSeq         int
+	configs []Config // indexed by config num
+	max_seq int
 }
 
 type Op struct {
 	// Your data here.
-	OperationID   int64
-	OperationType string
-	groupID       int64
-	servers       []string
-	shardNo       int
-	queryNo       int
+	OpID       int64
+	new_config Config
+	OpType     string
+	GID        int64
+	Servers    []string
+	Shard_no   int
+	Query_no   int
 }
 
 func nrand() int64 {
@@ -48,67 +48,51 @@ func nrand() int64 {
 
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) error {
 	// Your code here.
-
-	// Create a new Op struct
-	op := Op{
-		OperationID:   nrand(),
-		OperationType: "Join",
-		groupID:       args.GID,
-		servers:       args.Servers,
-	}
-
-	// Call syncOps method
-	Err := sm.syncOperations(op)
-	if Err != nil {
-		return Err
-	}
+	new_op := new(Op)
+	new_op.OpID = nrand()
+	new_op.OpType = "Join"
+	new_op.GID = args.GID
+	new_op.Servers = args.Servers
+	sm.syncOps(*new_op)
 
 	return nil
 }
 
 func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) error {
 	// Your code here.
-	// Create a new Op struct
-	op := Op{
-		OperationID:   nrand(),
-		OperationType: "Leave",
-		groupID:       args.GID,
-	}
-
-	sm.syncOperations(op)
+	new_op := new(Op)
+	new_op.OpID = nrand()
+	new_op.OpType = "Leave"
+	new_op.GID = args.GID
+	sm.syncOps(*new_op)
 
 	return nil
 }
 
 func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) error {
 	// Your code here.
-	op := Op{
-		OperationID:   nrand(),
-		OperationType: "Move",
-		groupID:       args.GID,
-		shardNo:       args.Shard,
-	}
-
-	sm.syncOperations(op)
+	new_op := new(Op)
+	new_op.OpID = nrand()
+	new_op.OpType = "Move"
+	new_op.GID = args.GID
+	new_op.Shard_no = args.Shard
+	sm.syncOps(*new_op)
 
 	return nil
 }
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) error {
 	// Your code here.
+	new_op := new(Op)
+	new_op.OpID = nrand()
+	new_op.OpType = "Query"
+	new_op.Query_no = args.Num
+	sm.syncOps(*new_op)
 
-	op := Op{
-		OperationID:   nrand(),
-		OperationType: "Query",
-		queryNo:       args.Num,
+	if args.Num == -1 || args.Num > (len(sm.configs)-1) {
+		args.Num = len(sm.configs) - 1
 	}
-
-	sm.syncOperations(op)
-
-	if args.Num == -1 || args.Num > (len(sm.configurations)-1) {
-		args.Num = len(sm.configurations) - 1
-	}
-	reply.Config = sm.configurations[args.Num]
+	reply.Config = sm.configs[args.Num]
 	// fmt.Println(sm.configs)
 
 	return nil
@@ -121,158 +105,139 @@ func (sm *ShardMaster) Kill() {
 	sm.px.Kill()
 }
 
-func (sm *ShardMaster) syncOperations(op Op) error {
-
-	// Declare constants and configure defaults upfront
-	const (
-		maxWait     = 10 * time.Second
-		backoffRate = 2
-	)
-	var (
-		waitDuration = 10 * time.Millisecond
-	)
+func (sm *ShardMaster) syncOps(new_Op Op) {
+	// Implementing Join for now
+	to := 10 * time.Millisecond
+	sm.mu.Lock()
+	// fmt.Println(new_Op.OpType, sm.me)
 
 	for {
-
-		// Lock mutex for the entire loop
-		sm.mu.Lock()
-
-		curConfig := sm.configurations[len(sm.configurations)-1]
-		seq := sm.maxSeq
-
+		cur_config := sm.configs[len(sm.configs)-1]
+		seq := sm.max_seq
 		decided, value := sm.px.Status(seq)
-
 		if decided {
-
-			// Use a meaningful variable name
-			newOp := value.(Op)
-
-			// Initialize new config properly
-			var newConfig Config
-			newConfig.Groups = make(map[int64][]string)
-
-			// Copy current groups
-			for key, value := range curConfig.Groups {
-				newConfig.Groups[key] = value
+			v := value.(Op)
+			var new_config Config
+			new_config.Groups = make(map[int64][]string)
+			for key, value := range cur_config.Groups {
+				new_config.Groups[key] = value
 			}
 
-			// Update config fields
-			newConfig.Num = curConfig.Num + 1
-			newConfig.Shards = curConfig.Shards
+			new_config.Num = cur_config.Num + 1
+			new_config.Shards = cur_config.Shards
+			if v.OpType == "Join" {
+				// fmt.Println(new_Op.Servers, new_Op.GID)
 
-			switch newOp.OperationType {
-			case "Join":
-				newConfig.Groups[newOp.groupID] = newOp.servers
-				newConfig = sm.balanceShards(newConfig)
-				sm.configurations = append(sm.configurations, newConfig)
+				new_config.Groups[v.GID] = v.Servers
 
-			case "Leave":
-				delete(newConfig.Groups, newOp.groupID)
-				newConfig = sm.balanceShards(newConfig)
-				sm.configurations = append(sm.configurations, newConfig)
+				new_config = sm.distribute(new_config)
+				sm.configs = append(sm.configs, new_config)
 
-			case "Move":
-				newConfig.Shards[newOp.shardNo] = newOp.groupID
-				sm.configurations = append(sm.configurations, newConfig)
+			} else if v.OpType == "Leave" {
+				delete(new_config.Groups, v.GID)
+				new_config = sm.distribute(new_config)
+				sm.configs = append(sm.configs, new_config)
+
+			} else if v.OpType == "Move" {
+				new_config.Shards[v.Shard_no] = v.GID
+				sm.configs = append(sm.configs, new_config)
+			} else if v.OpType == "Query" {
+				// sm.configs = append(sm.configs, new_config)
 			}
-
-			if op.OperationID == newOp.OperationID {
+			if new_Op.OpID == v.OpID {
 				break
 			}
 
-			sm.maxSeq++
+			// kv.px.Done(seq)
+			sm.max_seq++
 
 		} else {
-
-			sm.px.Start(seq, op)
-
-			// Exponential backoff
-			time.Sleep(waitDuration)
-			waitDuration *= backoffRate
-			if waitDuration > maxWait {
-				waitDuration = maxWait
+			sm.px.Start(seq, new_Op)
+			time.Sleep(to)
+			if to < 10*time.Second {
+				r := 2
+				to *= time.Duration(r)
 			}
-
 		}
-
-		sm.mu.Unlock()
-
 	}
-
-	sm.px.Done(sm.maxSeq)
-	sm.maxSeq++
-
-	return nil
+	sm.px.Done(sm.max_seq)
+	sm.max_seq++
+	sm.mu.Unlock()
+	return
 }
 
-func (sm *ShardMaster) balanceShards(config Config) Config {
+func (sm *ShardMaster) distribute(config Config) Config {
 	if len(config.Groups) == 0 {
 		return config
 	}
-
-	numGroups := len(config.Groups)
-	numberOfShards := 10 / numGroups
-	extraShards := 10 % numGroups
-	lastSeqNum := len(sm.configurations) - 1
-
-	shardsPerGroup := make(map[int64]int)
+	number_of_shards := 10 / len(config.Groups)
+	greater_allowed := 10 % len(config.Groups)
+	count := make(map[int64]int)
+	seq_nu := len(sm.configs) - 1
 
 	// Count number of shards served by a group
-	for _, shardGroup := range config.Shards {
-		if group, ok := config.Groups[shardGroup]; ok {
-			groupID, _ := strconv.ParseInt(group[0], 10, 64)
-			shardsPerGroup[groupID]++
+	for k, v := range config.Shards {
+
+		// This is used to give back if the group is not present
+		if _, ok := config.Groups[v]; ok == false {
+			config.Shards[k] = 0
+			continue
 		}
+		if v == 0 {
+			continue
+		}
+		count[v] += 1
 	}
 
 	// Remove excess shards
-	for groupID, servedShards := range shardsPerGroup {
-		if servedShards == 0 || groupID == 0 {
+	for k, v := range count {
+		if v == 0 || k == 0 {
 			continue
 		}
-
-		if servedShards == numberOfShards+1 && extraShards > 0 {
-			extraShards--
-		} else if servedShards >= numberOfShards+1 {
-			removeShards := servedShards - numberOfShards
-			if extraShards > 0 {
-				removeShards--
-				extraShards--
+		if v == number_of_shards+1 && greater_allowed > 0 {
+			greater_allowed--
+		} else if v >= number_of_shards+1 {
+			remove_shards := v - number_of_shards
+			if greater_allowed > 0 {
+				remove_shards--
+				greater_allowed--
 			}
-			for idx, shardGroup := range config.Shards {
-				if shardGroup == groupID {
+			for idx, _ := range config.Shards {
+				if config.Shards[idx] == k {
 					config.Shards[idx] = 0
-					removeShards--
+					remove_shards--
 				}
-				if removeShards == 0 {
+				if remove_shards == 0 {
 					break
 				}
+
 			}
 		}
 	}
-
-	// Add missing shards
-	for groupID := range config.Groups {
-		servedShards := shardsPerGroup[groupID]
-		if servedShards < numberOfShards || (servedShards == numberOfShards && extraShards > 0) {
-			addShards := numberOfShards - servedShards
-			if extraShards > 0 {
-				addShards++
-				extraShards--
+	for k, _ := range config.Groups {
+		v := count[k]
+		if v < number_of_shards || (v == number_of_shards && greater_allowed > 0) {
+			add_shards := number_of_shards - v
+			if greater_allowed > 0 {
+				add_shards++
+				greater_allowed--
 			}
-			for idx := range sm.configurations[lastSeqNum].Shards {
+			for idx, _ := range sm.configs[seq_nu].Shards {
 				if config.Shards[idx] == 0 {
-					config.Shards[idx] = groupID
-					addShards--
+					config.Shards[idx] = k
+					add_shards--
 				}
-				if addShards == 0 {
+				if add_shards == 0 {
 					break
 				}
-			}
-		}
-	}
 
+			}
+
+		}
+
+	}
 	return config
+
 }
 
 // servers[] contains the ports of the set of
@@ -285,9 +250,9 @@ func StartServer(servers []string, me int) *ShardMaster {
 	sm := new(ShardMaster)
 	sm.me = me
 
-	sm.configurations = make([]Config, 1)
-	sm.configurations[0].Groups = map[int64][]string{}
-	sm.maxSeq = 0
+	sm.configs = make([]Config, 1)
+	sm.configs[0].Groups = map[int64][]string{}
+	sm.max_seq = 0
 
 	rpcs := rpc.NewServer()
 	rpcs.Register(sm)
