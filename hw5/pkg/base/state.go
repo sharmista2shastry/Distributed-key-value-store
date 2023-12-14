@@ -3,6 +3,7 @@ package base
 import (
 	"encoding/binary"
 	"hash/fnv"
+	"log"
 	"math/rand"
 )
 
@@ -184,9 +185,50 @@ func (s *State) isMessageReachable(index int) (bool, *State) {
 	return true, nil
 }
 
+func (s *State) isMessageDropped(index int) (bool, *State) {
+	newState := s.Inherit(DropOffEvent(s.Network[index])) // Assuming clone() creates a deep copy of the state
+	newState.Network = append(s.Network[:index], s.Network[index+1:]...)
+
+	return true, newState
+}
+
+func (s *State) isMessageDuplicated(index int) (bool, *State) {
+	targetMessage := s.Network[index]
+	newState := s.Inherit(HandleDuplicateEvent(targetMessage))
+	return true, newState
+}
+
+func (s *State) isMessageArrivedNormally(index int) (bool, *State) {
+
+	// Create a new state for the case where the message arrives normally
+	newState := s.Inherit(HandleEvent(s.Network[index]))
+	return true, newState
+}
+
 func (s *State) HandleMessage(index int, deleteMessage bool) (result []*State) {
-	//TODO: implement it
-	panic("implement me")
+	message := s.Network[index]
+	recipientAddress := message.To()
+	recipientNode := s.nodes[recipientAddress]
+
+	newNodes := recipientNode.MessageHandler(message)
+
+	if len(newNodes) == 0 {
+		return nil // return nil if no new nodes are created
+	}
+
+	for _, newNode := range newNodes {
+		newState := s.Inherit(HandleEvent(message))    // Create a new state by cloning the current state
+		newState.UpdateNode(recipientAddress, newNode) // Update the node in the new state
+		newState.Receive(newNode.HandlerResponse())    // New state receives the messages from the new node
+
+		if deleteMessage {
+			newState.DeleteMessage(index) // Delete the message from the new state if required
+		}
+
+		result = append(result, newState) // Append the new state to the result
+	}
+
+	return result
 }
 
 func (s *State) DeleteMessage(index int) {
@@ -226,16 +268,29 @@ func (s *State) NextStates() []*State {
 			continue
 		}
 
-		// TODO: Drop off a message
+		// Drop off a message
 		if s.isDropOff {
+			dropped, newState := s.isMessageDropped(i)
+			if dropped {
+				nextStates = append(nextStates, newState)
+			}
 		}
 
-		// TODO: Message arrives Normally. (use HandleMessage)
+		// Message arrives Normally. (use HandleMessage)
+		arrived, _ := s.isMessageArrivedNormally(i)
+		if arrived {
+			newStates := s.HandleMessage(i, true)
+			nextStates = append(nextStates, newStates...)
+		}
 
-		// TODO: Message arrives but the message is duplicated. The same message may come later again
+		// Message arrives but the message is duplicated. The same message may come later again
 		// (use HandleMessage)
 		if s.isDuplicate {
-
+			duplicated, _ := s.isMessageDuplicated(i)
+			if duplicated {
+				newStates := s.HandleMessage(i, false) // Don't delete the message
+				nextStates = append(nextStates, newStates...)
+			}
 		}
 
 	}
@@ -245,19 +300,42 @@ func (s *State) NextStates() []*State {
 	for _, address := range s.addresses {
 		node := s.nodes[address]
 
-		//TODO: call the timer (use TriggerNodeTimer)
+		// call the timer (use TriggerNodeTimer)
+		newStates := s.TriggerNodeTimer(address, node)
+		nextStates = append(nextStates, newStates...)
 	}
 
 	return nextStates
 }
 
 func (s *State) TriggerNodeTimer(address Address, node Node) []*State {
-	//TODO: implement it
-	panic("implement me")
+	// Create a slice to hold the new states
+	newStates := make([]*State, 0)
 
+	// Trigger the timer on the node
+	newNodes := node.TriggerTimer()
+
+	if len(newNodes) == 0 {
+		return nil // return nil if no new nodes are created
+	}
+
+	// For each new node, create a new state
+	for _, newNode := range newNodes {
+		// Create a new state by inheriting the current state
+		newState := s.Inherit(TriggerEvent(address, node.NextTimer()))
+
+		// Update the new state with the new node
+		newState.UpdateNode(address, newNode)
+
+		// Append the new state to the newStates slice
+		newStates = append(newStates, newState)
+	}
+
+	return newStates
 }
 
 func (s *State) RandomNextState() *State {
+	log.Println("Entering RandomNextState")
 	timerAddresses := make([]Address, 0, len(s.nodes))
 	for addr, node := range s.nodes {
 		if IsNil(node.NextTimer()) {
@@ -266,22 +344,59 @@ func (s *State) RandomNextState() *State {
 		timerAddresses = append(timerAddresses, addr)
 	}
 
-	roll := rand.Intn(len(s.Network) + len(timerAddresses))
+	totalLength := len(s.Network) + len(timerAddresses)
+
+	if totalLength <= 0 {
+		log.Println("Exiting RandomNextState: totalLength <= 0")
+		return &State{
+			nodes:       map[Address]Node{},
+			blockLists:  map[Address][]Address{},
+			Network:     []Message{},
+			Depth:       s.Depth + 1,
+			isDropOff:   false,
+			isDuplicate: false,
+			nodeHash:    0,
+			networkHash: 0,
+			hashSorted:  false,
+		}
+	}
+
+	roll := rand.Intn(totalLength)
 
 	if roll < len(s.Network) {
 		// check Network Partition
+		log.Println("In Network section")
 		reachable, newState := s.isMessageReachable(roll)
 		if !reachable {
+			log.Println("Exiting RandomNextState: message not reachable")
 			return newState
 		}
 
-		//TODO: handle message and return one state
+		// handle message and return one state
+		newStates := s.HandleMessage(roll, true)
+		if len(newStates) > 0 {
+			log.Println("Exiting RandomNextState: after handling message")
+			return newStates[0] // return the first new state
+		}
+	} else if roll-len(s.Network) < len(timerAddresses) {
+		log.Println("In Timer section")
+		// trigger timer and return one state
+		address := timerAddresses[roll-len(s.Network)]
+		node, ok := s.nodes[address]
+		if !ok {
+			log.Println("Exiting RandomNextState: node not found")
+			// handle the error, for example by returning the current state or logging an error
+			return s
+		}
+		newStates := s.TriggerNodeTimer(address, node)
+		if len(newStates) > 0 {
+			log.Println("Exiting RandomNextState: after triggering timer")
+			return newStates[0] // return the first new state
+		}
 	}
 
-	// TODO: trigger timer and return one state
-	address := timerAddresses[roll-len(s.Network)]
-	node := s.nodes[address]
-
+	log.Println("Exiting RandomNextState: no new state created")
+	return s // return the current state if no new state is created
 }
 
 // Calculate the hash function of a State based on its nodeHash and networkHash.

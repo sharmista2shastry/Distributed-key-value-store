@@ -114,6 +114,7 @@ func TestNextStates(t *testing.T) {
 	// (4) message arrival normally + server handles in a crazy mode,
 	// (5) message arrival with duplicate + server handles in a normal mode
 	// (6) message arrival with duplicate + server handles in a crazy mode
+
 	if len(nextStates) != 6 {
 		t.Fail()
 	}

@@ -452,8 +452,10 @@ func TestPartition2(t *testing.T) {
 // This check functions requires the program: (1) A2 rejects P1 and (2) S3 is the first server to know a consensus
 // is reached.
 func checksForCase5Failures() []func(s *base.State) bool {
+
 	checks := ToA2RejectP1()
 
+	// Checks if server s2 rejects server s1's accept request
 	checks = append(checks, func(s *base.State) bool {
 		event := s.Event
 		if event.Action != base.Handle && event.Action != base.HandleDuplicate {
@@ -465,6 +467,7 @@ func checksForCase5Failures() []func(s *base.State) bool {
 
 	checks = append(checks, ToConsensusCase5()...)
 
+	// checks if the server at node "s3" has agreed on the value "v3" and all other servers have not agreed on any value
 	checks = append(checks, func(s *base.State) bool {
 		for addr, node := range s.Nodes() {
 			server := node.(*Server)
@@ -602,7 +605,7 @@ func concurrentProposerChecks() []func(s *base.State) bool {
 	return checks
 }
 
-// https://docs.google.com/presentation/d/1ESICVkGl0zNY-95bTCGoJhbcYeiKGUQAuepUaITvJhg/edit#slide=id.g9f0e2b3fae_0_180
+// // https://docs.google.com/presentation/d/1ESICVkGl0zNY-95bTCGoJhbcYeiKGUQAuepUaITvJhg/edit#slide=id.g9f0e2b3fae_0_180
 func TestConcurrentProposer(t *testing.T) {
 	fmt.Printf("Test: Concurrent proposers...\n")
 	peers := []base.Address{"s1", "s2", "s3"}

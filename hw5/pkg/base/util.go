@@ -15,10 +15,11 @@ func Hash(prefix string, o interface{}) uint64 {
 }
 
 type entry struct {
-	key   uint64
-	value Message
+	key   uint64  // hash of the message
+	value Message // the message
 }
 
+// Sort messages by hash.
 func hashSort(messages []Message) {
 	entries := make([]entry, 0, len(messages))
 	for _, message := range messages {
@@ -37,6 +38,7 @@ func hashSort(messages []Message) {
 	}
 }
 
+// Determines if an interface is nil by checking its underlying type
 func IsNil(i interface{}) bool {
 	if i == nil {
 		return true
