@@ -1,0 +1,6 @@
+Test: First primary ...
+--- FAIL: Test1 (1.01s)
+    test_test.go:13: wanted primary /var/tmp/824-501/viewserver-7183-1, got 
+FAIL
+exit status 1
+FAIL	_/Users/sharmistashastry/4113/src/viewservice	1.164s

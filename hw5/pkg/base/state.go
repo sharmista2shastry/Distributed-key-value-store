@@ -186,46 +186,77 @@ func (s *State) isMessageReachable(index int) (bool, *State) {
 }
 
 func (s *State) isMessageDropped(index int) (bool, *State) {
-	newState := s.Inherit(DropOffEvent(s.Network[index])) // Assuming clone() creates a deep copy of the state
-	newState.Network = append(s.Network[:index], s.Network[index+1:]...)
+	if !s.isDropOff {
+		return false, s
+	}
 
-	return true, newState
+	message := s.Network[index]
+	dropCandidate := rand.Float64() < 0.5 // Adjust this probability as needed
+
+	if dropCandidate {
+		newState := s.Inherit(DropOffEvent(message))
+		newState.DeleteMessage(index)
+		return true, newState
+	}
+
+	return false, s
 }
 
 func (s *State) isMessageDuplicated(index int) (bool, *State) {
-	targetMessage := s.Network[index]
-	newState := s.Inherit(HandleDuplicateEvent(targetMessage))
-	return true, newState
+	if !s.isDuplicate {
+		return false, s
+	}
+
+	duplicateCandidate := rand.Float64() < 0.5 // Adjust this probability as needed
+
+	if duplicateCandidate {
+		newStates := s.HandleMessage(index, false) // Don't delete the message
+		if len(newStates) > 0 {
+			return true, newStates[0] // Return the first new state
+		}
+	}
+
+	return false, s
 }
 
 func (s *State) isMessageArrivedNormally(index int) (bool, *State) {
+	reachable, newState := s.isMessageReachable(index)
+	if !reachable {
+		return false, newState
+	}
 
-	// Create a new state for the case where the message arrives normally
-	newState := s.Inherit(HandleEvent(s.Network[index]))
-	return true, newState
+	newStates := s.HandleMessage(index, true)
+	if len(newStates) > 0 {
+		return true, newStates[0] // Return the first new state
+	}
+
+	return false, s
 }
 
-func (s *State) HandleMessage(index int, deleteMessage bool) (result []*State) {
+func (s *State) HandleMessage(index int, deleteMessage bool) []*State {
 	message := s.Network[index]
 	recipientAddress := message.To()
 	recipientNode := s.nodes[recipientAddress]
 
 	newNodes := recipientNode.MessageHandler(message)
 
-	if len(newNodes) == 0 {
-		return nil // return nil if no new nodes are created
-	}
+	var result []*State
 
 	for _, newNode := range newNodes {
-		newState := s.Inherit(HandleEvent(message))    // Create a new state by cloning the current state
-		newState.UpdateNode(recipientAddress, newNode) // Update the node in the new state
-		newState.Receive(newNode.HandlerResponse())    // New state receives the messages from the new node
+		newState := s.Clone()                       // Clone the current state
+		newState.Event = HandleEvent(message)       // Set the event for the new state
+		newState.nodes[recipientAddress] = newNode  // Update the node in the new state
+		newState.Receive(newNode.HandlerResponse()) // New state receives the messages from the new node
 
 		if deleteMessage {
 			newState.DeleteMessage(index) // Delete the message from the new state if required
 		}
 
 		result = append(result, newState) // Append the new state to the result
+	}
+
+	if len(result) == 0 {
+		return nil // Return nil if no new states are created
 	}
 
 	return result
